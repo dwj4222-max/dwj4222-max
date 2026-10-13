@@ -10,6 +10,13 @@
   html, body { margin: 0; height: 100%; font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #1f2937; }
   #app { position: relative; height: 100%; }
   #panel { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1000; width: 390px; overflow-y: auto; background: rgba(248,250,252,.7); border-right: 1px solid rgba(226,232,240,.7); padding: 18px 18px 30px; transition: transform .25s ease; }
+  #scoreLoad { position: fixed; inset: 0; z-index: 5000; background: rgba(0,0,0,.5); display: none; place-items: center; }
+  #scoreLoad.on { display: grid; }
+  .pl-box { width: 300px; text-align: center; color: #fff; font-size: 14px; font-weight: 600; }
+  .pl-track { height: 10px; background: rgba(255,255,255,.25); border-radius: 5px; overflow: hidden; margin-top: 12px; }
+  .pl-track > i { display: block; height: 100%; width: 0; background: #fff; border-radius: 5px; }
+  #scoreLoad.on .pl-track > i { animation: plFill 2s linear forwards; }
+  @keyframes plFill { to { width: 100%; } }
   #panel { scrollbar-width: none; -ms-overflow-style: none; }
   #panel::-webkit-scrollbar { display: none; }
   #app.collapsed #panel { transform: translateX(-100%); }
@@ -108,6 +115,7 @@
   <button id="panelToggle" title="메뉴 숨기기" aria-label="메뉴 숨기기">☰</button>
   <div id="map"></div>
 </div>
+<div id="scoreLoad"><div class="pl-box">입지 분석 중…<div class="pl-track"><i></i></div></div></div>
 <div id="loading"><div><div class="spin"></div><div id="loadMsg">두정동 도로 데이터를 불러오는 중…</div></div></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -471,18 +479,37 @@ function drawHeat() {
 const GRADES = [[85, 'S', '최적 입지', '#7c3aed'], [70, 'A', '우수', '#2563eb'], [55, 'B', '양호', '#059669'], [40, 'C', '보통', '#d97706'], [0, 'D', '비추천', '#dc2626']];
 const gradeOf = s => GRADES.find(g => s >= g[0]);
 
+// 분석 로딩 표시 (전체 화면 50% 검은 막 + 2초 진행 바)
+let pending = null;
+function showLoading(on) {
+  const el = document.getElementById('scoreLoad');
+  el.classList.remove('on'); void el.offsetWidth; // 진행 바 애니메이션 재시작
+  el.classList.toggle('on', on);
+}
+function cancelLoading() { clearTimeout(pending); pending = null; showLoading(false); }
+
 // 선택 해제 → 초기 상태로 원복
 function resetSelection() {
+  cancelLoading();
   state.current = null;
   pickLayer.clearLayers();
   document.getElementById('result').innerHTML = '<h2>3. 입지 분석 결과</h2><div class="empty">지도 위 원하는 위치를 클릭하세요.</div>';
 }
 
-function analyze(latlng, addHistory = true) {
+function analyze(latlng, addHistory = true, animate = false) {
   const { lat, lng } = latlng;
   const [x, y] = toXY(lat, lng);
   // 두정동 밖(흐리게 표시된 영역)을 클릭하면 선택 해제
   if (lat < BBOX.s || lat > BBOX.n || lng < BBOX.w || lng > BBOX.e || !insideDong(x, y)) { resetSelection(); return; }
+  if (animate) { // 클릭 지점만 먼저 표시하고 2초 로딩 후 결과 출력
+    cancelLoading();
+    pickLayer.clearLayers();
+    L.circleMarker([lat, lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#94a3b8', fillOpacity: 1, interactive: false }).addTo(pickLayer);
+    showLoading(true);
+    pending = setTimeout(() => { pending = null; showLoading(false); analyze(latlng, addHistory); }, 2000);
+    return;
+  }
+  if (pending) return; // 로딩 중에는 업종·시각 변경에 따른 재분석 생략 (로딩 끝날 때 최신 설정으로 계산)
   state.current = { lat, lng };
   const b = computeBase(x, y), t = computeTraffic(b), res = scorePoint(b, t), F = FR[state.fr];
   const [, gl, gt, gc] = gradeOf(res.score);
@@ -541,7 +568,7 @@ function analyze(latlng, addHistory = true) {
 function renderHistory() {
   const ul = document.getElementById('history');
   ul.innerHTML = history.map((h, i) => `<li data-i="${i}"><span>${h.fr} · ${h.lat.toFixed(4)}, ${h.lng.toFixed(4)}</span><b style="color:${h.color}">${h.score}점 ${h.grade}</b></li>`).join('');
-  ul.querySelectorAll('li').forEach(li => li.onclick = () => { const h = history[+li.dataset.i]; map.panTo([h.lat, h.lng]); analyze(L.latLng(h.lat, h.lng), false); });
+  ul.querySelectorAll('li').forEach(li => li.onclick = () => { const h = history[+li.dataset.i]; map.panTo([h.lat, h.lng]); analyze(L.latLng(h.lat, h.lng), false, true); });
 }
 
 // ───────────────────────── UI ─────────────────────────
@@ -572,7 +599,7 @@ function initUI() {
   document.getElementById('legendBar').style.background = `linear-gradient(to right, ${STOPS.map(([v, c]) => `${c} ${v / maxV * 100}%`).join(',')})`;
   document.getElementById('legendTicks').innerHTML = [0, 600, 1400, 2000, 2800].map(v => `<span>${fmt(v)}${v === maxV ? '+' : ''}</span>`).join('');
   map.on('moveend zoomend', drawLabels);
-  map.on('click', e => analyze(e.latlng));
+  map.on('click', e => analyze(e.latlng, true, true));
 }
 
 // 순서 없는 경계선 조각들을 끝점끼리 이어 닫힌 링으로 조립
